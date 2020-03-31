@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: @project.artifactId@
+  profiles:
+    active: dev
+  rocketmq:
+    producer-group: @project.artifactId@
+    consumer-group: @project.artifactId@
+server:
+  port: 8081
+  compression:
+    enabled: true
+---
+spring:
+  profiles: local
+  rocketmq:
+    namesrv-addr: localhost:9876
+---
+spring:
+  profiles: dev
+  redis:
+    host: 192.168.210.146
+  rocketmq:
+    namesrv-addr: 192.168.210.144:9876
