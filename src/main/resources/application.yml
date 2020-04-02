@@ -15,6 +15,11 @@ spring:
   profiles: local
   rocketmq:
     namesrv-addr: localhost:9876
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/order
+    username: root
+    password: root
 ---
 spring:
   profiles: dev
@@ -22,3 +27,8 @@ spring:
     host: 192.168.210.146
   rocketmq:
     namesrv-addr: 192.168.210.144:9876
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/order
+    username: root
+    password: root

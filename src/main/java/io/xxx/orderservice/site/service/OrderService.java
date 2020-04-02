@@ -1,37 +1,65 @@
 package io.xxx.orderservice.site.service;
 
 import com.alibaba.fastjson.JSON;
+import com.baomidou.mybatisplus.core.toolkit.IdWorker;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.xxx.orderservice.config.RocketMQProperties;
 import io.xxx.orderservice.domain.Order;
+import io.xxx.orderservice.domain.OrderItem;
 import io.xxx.orderservice.domain.OrderMessage;
-import io.xxx.orderservice.util.IdWorker;
+import io.xxx.orderservice.site.data.OrderItemMapper;
+import io.xxx.orderservice.site.data.OrderMapper;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
+import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
+import org.apache.rocketmq.client.consumer.listener.MessageListenerConcurrently;
 import org.apache.rocketmq.client.producer.DefaultMQProducer;
 import org.apache.rocketmq.client.producer.SendResult;
+import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.Message;
-import org.apache.rocketmq.remoting.common.RemotingHelper;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.apache.rocketmq.common.message.MessageExt;
+import org.springframework.beans.factory.InitializingBean;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
 @Service
-public class OrderService {
+public class OrderService implements InitializingBean {
 
-    private static final String TOPIC_ORDER_CREATED = "ORDER_CREATED";
+    private static final String TOPIC_ORDER_CREATED = "OMNI_ORDER";
 
-    private final IdWorker idWorker = new IdWorker(0, 0);
     private StringRedisTemplate redisTemplate;
     private RedisScript<Boolean> createOrderScript;
     private ObjectMapper objectMapper;
     private DefaultMQProducer producer;
+    private final RocketMQProperties properties;
+    private final OrderMapper orderMapper;
+    private final OrderItemMapper itemMapper;
+
+    public OrderService(StringRedisTemplate redisTemplate,
+                        RedisScript<Boolean> createOrderScript,
+                        ObjectMapper objectMapper,
+                        DefaultMQProducer producer,
+                        RocketMQProperties properties,
+                        OrderMapper orderMapper,
+                        OrderItemMapper itemMapper) {
+        this.redisTemplate = redisTemplate;
+        this.createOrderScript = createOrderScript;
+        this.objectMapper = objectMapper;
+        this.producer = producer;
+        this.properties = properties;
+        this.orderMapper = orderMapper;
+        this.itemMapper = itemMapper;
+    }
 
     @SneakyThrows
     public OrderMessage create(Order order) {
@@ -41,10 +69,9 @@ public class OrderService {
             boolean result = deductAndSave(order);
             if (result) {
                 OrderMessage orderMessage = new OrderMessage(order);
-                String content = JSON.toJSONString(orderMessage);
-                Message message = new Message(TOPIC_ORDER_CREATED,
-                        "CREATED", order.getId().toString(),
-                        content.getBytes(RemotingHelper.DEFAULT_CHARSET));
+                String content = JSON.toJSONString(order);
+                Message message = new Message(TOPIC_ORDER_CREATED, null,
+                        order.getId().toString(), content.getBytes(StandardCharsets.UTF_8));
                 SendResult sendResult = producer.send(message, (mqs, msg, arg) -> {
                     Order o = (Order) arg;
                     long index = o.getBuyerId() % mqs.size();
@@ -66,7 +93,7 @@ public class OrderService {
     }
 
     public void initOrder(Order order) {
-        Long orderId = idWorker.nextId();
+        Long orderId = IdWorker.getId();
         order.setId(orderId);
         LocalDateTime now = LocalDateTime.now();
         order.setCreated(now);
@@ -85,7 +112,7 @@ public class OrderService {
             // Redis Cluster需要key
             List<String> keys = new ArrayList<>();
             keys.add("orders:" + order.getId());
-            for (Order.Item item : order.getItems()) {
+            for (OrderItem item : order.getItems()) {
                 keys.add("product:" + item.getPid());
             }
 
@@ -101,24 +128,36 @@ public class OrderService {
         return true;
     }
 
-    @Autowired
-    public void setRedisTemplate(StringRedisTemplate redisTemplate) {
-        this.redisTemplate = redisTemplate;
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        DefaultMQPushConsumer consumer = new DefaultMQPushConsumer(properties.getConsumerGroup());
+        consumer.setNamesrvAddr(properties.getNamesrvAddr());
+        consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_LAST_OFFSET);
+        consumer.subscribe(TOPIC_ORDER_CREATED, "*");
+        consumer.registerMessageListener((MessageListenerConcurrently) (msgs, context) -> {
+            for (MessageExt msg : msgs) {
+                String body = new String(msg.getBody(), StandardCharsets.UTF_8);
+                Order order = JSON.parseObject(body, Order.class);
+                save(order);
+
+                if (log.isDebugEnabled()) {
+                    log.debug("Order saved, {}.", body);
+                }
+            }
+            return ConsumeConcurrentlyStatus.CONSUME_SUCCESS;
+        });
+        consumer.start();
     }
 
-    @Autowired
-    public void setInventoryBookScript(RedisScript<Boolean> createOrderScript) {
-        this.createOrderScript = createOrderScript;
+    @Transactional
+    public void save(Order order) {
+        orderMapper.insert(order);
+        for (OrderItem item : order.getItems()) {
+            item.setId(IdWorker.getId());
+            item.setCreated(order.getCreated());
+            item.setModified(order.getModified());
+            item.setOrderId(order.getId());
+            itemMapper.insert(item);
+        }
     }
-
-    @Autowired
-    public void setObjectMapper(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
-    }
-
-    @Autowired
-    public void setProducer(DefaultMQProducer producer) {
-        this.producer = producer;
-    }
-
 }
